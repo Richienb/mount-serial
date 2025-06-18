@@ -1,0 +1,19 @@
+[project]
+name = "mount-serial"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pathvalidate>=3.2.3",
+    "pyserial>=3.5",
+    "userspacefs>=3.1.1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.11.13",
+]
+
+[tool.ruff.format]
+indent-style = "tab"
