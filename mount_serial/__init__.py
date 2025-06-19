@@ -497,7 +497,7 @@ def make_fs(args: typing.Dict[str, typing.Any]) -> FileSystem:
 	return FileSystem(**args)
 
 
-if __name__ == "__main__":
+def main():
 	parser = ArgumentParser()
 
 	parser.add_argument("port", type=str)
