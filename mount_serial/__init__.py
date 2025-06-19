@@ -1,4 +1,5 @@
 import collections
+import dataclasses
 import errno
 import os
 import sys
@@ -7,11 +8,14 @@ import time
 import typing
 from argparse import ArgumentParser
 from base64 import b64decode, b64encode
-from collections.abc import Buffer, Iterator
+from collections.abc import Buffer, Iterator, Sized
+from dataclasses import dataclass, field
 from datetime import datetime
 from glob import escape
 from itertools import islice
 from shlex import quote
+from pathlib import Path as PPath
+import re
 
 from serial import Serial
 from strip_ansi import strip_ansi
@@ -41,9 +45,26 @@ log = logging.getLogger(__name__)
 # Log everything
 logging.basicConfig(level=logging.DEBUG)
 
-Stat = collections.namedtuple(
-	"Stat", ["name", "mtime", "type", "size", "id", "ctime", "rev", "attrs"]
-)
+# Stat = collections.namedtuple(
+# 	"Stat", ["name", "mtime", "type", "size", "id", "ctime", "rev", "attrs"]
+# )
+
+
+@dataclass
+class Stat:
+	mtime: datetime
+	type: str
+	size: int
+	ctime: datetime
+	name: str = None
+	children: any = field(default_factory=lambda: [])
+	attrs: list[str] = field(default_factory=lambda: [])
+	id: PathT = None
+	rev: list[str] = field(default_factory=lambda: [])
+
+	def __post_init__(self):
+		self.attrs = [field_.name for field_ in dataclasses.fields(self.__class__)]
+
 
 try:
 	O_ACCMODE = os.O_ACCMODE
@@ -52,6 +73,8 @@ except AttributeError:
 		O_ACCMODE = 3
 	else:
 		raise
+
+file_type_regex = r"regular.* file"
 
 
 class SerialClient(Serial):
@@ -109,7 +132,6 @@ class SerialClient(Serial):
 
 		log.debug(f"Received output for {command}: {output}")
 
-		# Discard prompt
 		self.discard_prompt()
 
 		return output
@@ -120,7 +142,6 @@ class SerialClient(Serial):
 		# Read output
 		output = self.read_lines(num_lines)
 
-		# Discard prompt
 		self.discard_prompt()
 
 		return output
@@ -138,7 +159,16 @@ class SerialClient(Serial):
 
 		output = [line.rstrip("\r\n") for line in output]
 
+		log.debug(f"Received output for {command}: {'\n'.join(output)}")
+
 		return output
+
+	def query_no_output(self, command: str) -> None:
+		log.debug(f"Sending command: {command}")
+
+		self.send_command(command)
+
+		self.discard_prompt()
 
 
 class _File(PositionIO):
@@ -164,7 +194,7 @@ class _File(PositionIO):
 		with self.serial.lock:
 			response = self.serial.query_one_line(
 				# TODO: Skip might have been seek in older versions of Linux https://stackoverflow.com/questions/2017285/how-to-extract-specific-bytes-from-a-file-using-unix#comment13831652_2017355
-				f"dd if={escape(self.path)} skip={offset} count={size} 2>/dev/null | base64 -w0"
+				f"dd if={escape(self.path)} skip={offset} count={size} status=none | base64 -w0 && echo"
 			)
 
 		response = b64decode(response)
@@ -196,30 +226,34 @@ class _File(PositionIO):
 		# TODO: Check if write conflicts will occur
 
 		with self.serial.lock:
-			# TODO: Pad with null bytes if there is a gap between the end of the file and the offset
-			self.serial.send_command(
-				f"echo R; base64 -d | dd of={escape(self.path)} bs=1 seek={offset} conv=notrunc"
+			self.serial.query_no_output(
+				f"base64 -d <<< '{b64encode(buf).decode()}' | dd of={escape(self.path)} bs=1 seek={offset} conv=notrunc status=none"
 			)
 
-			# pyserial read until newline
-			response = self.serial.read_line()
+			# # TODO: Pad with null bytes if there is a gap between the end of the file and the offset
+			# self.serial.send_command(
+			# 	f"echo R; base64 -d | dd of={escape(self.path)} bs=1 seek={offset} conv=notrunc status=none"
+			# )
+			#
+			# # pyserial read until newline
+			# response = self.serial.read_line()
+			#
+			# # TODO: Check if ready signal is needed, or if .flush() is enough, or not necessary either
+			# if response != "R":
+			# 	# TODO: Check if this type of error is correct
+			# 	raise OSError(errno.EIO, os.strerror(errno.EIO))
+			#
+			# # Stream Base64
+			# self.serial.write(b64encode(buf))
+			#
+			# self.serial.write(b"\x04")  # Interrupt
+			#
+			# # TODO: Catch write errors, such as disk full, file not found, readonly
+			#
+			# # Wait for termination, discarding prompt
+			# self.serial.discard_prompt()
 
-			# TODO: Check if ready signal is needed, or if .flush() is enough, or not necessary either
-			if response != "R":
-				# TODO: Check if this type of error is correct
-				raise OSError(errno.EIO, os.strerror(errno.EIO))
-
-			# Stream Base64
-			self.serial.write(b64encode(buf))
-
-			self.serial.write(b"\x04")  # Interrupt
-
-			# TODO: Catch write errors, such as disk full, file not found, readonly
-
-			# Wait for termination, discarding prompt
-			self.serial.discard_prompt()
-
-		return len(response)
+		return len(typing.cast(Sized, buf))
 
 	def writable(self) -> bool:
 		return (self.mode & O_ACCMODE) in (os.O_WRONLY, os.O_RDWR)
@@ -230,7 +264,7 @@ class _File(PositionIO):
 
 		with self.serial.lock:
 			# If there is a gap between the end of the file and the offset, it will be filled with null bytes
-			self.serial.query_one_line(f'truncate -s {offset} "{self.path}"')
+			self.serial.query_no_output(f'truncate -s {offset} "{self.path}"')
 
 		# New file size
 		return offset
@@ -243,11 +277,12 @@ class _Directory(OldDirectoryProtocol):
 
 		delimiter = self.serial.terminal_escape("\037")  # ASCII unit seperator
 		suffix = "\0"  # Null terminator
-		
+
 		delimiter = "MOUNTSERIALDELIMITER"
 
 		with self.serial.lock:
 			# TODO: Slightly different -c argument should be used for MacOS
+			# TODO: Stream contents
 			contents = self.serial.query_multiple_lines(
 				# f'd={delimiter}; find {quote(str(path))} -mindepth 1 -maxdepth 1 -exec stat -c "%n$d%s$d%F$d%Y$d%Z" "{{}}" \\;'
 				f'find {quote(str(path))} -mindepth 1 -maxdepth 1 -exec stat -c "%n{delimiter}%s{delimiter}%F{delimiter}%Y{delimiter}%Z" "{{}}" \\;'
@@ -257,6 +292,22 @@ class _Directory(OldDirectoryProtocol):
 
 		for item in contents:
 			name, size, file_type, mtime, ctime = item.split(delimiter)
+
+			name = PPath(name).name
+
+			log.debug(f"Found {name}")
+
+			if file_type == "symbolic link":
+				# TODO: Handle symbolic links
+				log.debug(f"Skipping symbolic link: {name}")
+				continue
+
+			if file_type == "special":
+				log.debug(f"Skipping special file: {name}")
+				continue
+
+			if re.match(file_type_regex, file_type) is not None:
+				file_type = "file"
 
 			files.append(
 				Stat(
@@ -268,7 +319,7 @@ class _Directory(OldDirectoryProtocol):
 					# TODO: Remove these
 					id=name,
 					rev=[],
-					attrs=Stat._fields,
+					children=12,
 				)
 			)
 
@@ -323,12 +374,16 @@ class FileSystem(fsabc.FileSystemG[Path, _File]):
 			# TODO: Slightly different -c argument should be used for MacOS
 			response = self.serial.query_one_line(
 				# f'd={delimiter}; stat -c "%s$d%F$d%Y$d%Z" {escape(str(path))}'
-				f'stat -c "%s{delimiter}%F{delimiter}%Y{delimiter}%Z" {escape(str(path))}'
+				f'stat -c "%s:%F:%Y:%Z" {escape(str(path))}'
 			)
+
+		if response.startswith("stat: cannot statx"):
+			# This means the file does not exist
+			raise OSError(errno.ENOENT, os.strerror(errno.ENOENT))
 
 		# log.debug("Received stat response: %s", response)
 
-		size, file_type, mtime, ctime = response.split(delimiter)
+		size, file_type, mtime, ctime = response.split(":")
 
 		return NewStat(
 			Stat(
@@ -340,7 +395,7 @@ class FileSystem(fsabc.FileSystemG[Path, _File]):
 				# TODO: Remove these
 				id=path,
 				rev=[],
-				attrs=Stat._fields
+				children=12,
 			)
 		)
 
