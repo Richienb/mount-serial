@@ -7,6 +7,8 @@ requires-python = ">=3.12"
 dependencies = [
     "pathvalidate>=3.2.3",
     "pyserial>=3.5",
+    "stransi>=0.3.0",
+    "strip-ansi>=0.1.1",
     "userspacefs>=3.1.1",
 ]
 

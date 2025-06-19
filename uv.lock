@@ -159,6 +159,8 @@ source = { virtual = "." }
 dependencies = [
     { name = "pathvalidate" },
     { name = "pyserial" },
+    { name = "stransi" },
+    { name = "strip-ansi" },
     { name = "userspacefs" },
 ]
 
@@ -171,6 +173,8 @@ dev = [
 requires-dist = [
     { name = "pathvalidate", specifier = ">=3.2.3" },
     { name = "pyserial", specifier = ">=3.5" },
+    { name = "stransi", specifier = ">=0.3.0" },
+    { name = "strip-ansi", specifier = ">=0.1.1" },
     { name = "userspacefs", specifier = ">=3.1.1" },
 ]
 
@@ -235,6 +239,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2b/b0/fdf4c73ad1c55e0f4dbbf2aa59dd37037334091f9a4961646d2b7ac91a86/multidict-6.4.4-cp313-cp313t-win32.whl", hash = "sha256:3312f63261b9df49be9d57aaa6abf53a6ad96d93b24f9cc16cf979956355ce6e", size = 41913, upload-time = "2025-05-19T14:16:03.199Z" },
     { url = "https://files.pythonhosted.org/packages/8e/92/27989ecca97e542c0d01d05a98a5ae12198a243a9ee12563a0313291511f/multidict-6.4.4-cp313-cp313t-win_amd64.whl", hash = "sha256:ba852168d814b2c73333073e1c7116d9395bea69575a01b0b3c89d2d5a87c8fb", size = 46112, upload-time = "2025-05-19T14:16:04.909Z" },
     { url = "https://files.pythonhosted.org/packages/84/5d/e17845bb0fa76334477d5de38654d27946d5b5d3695443987a094a71b440/multidict-6.4.4-py3-none-any.whl", hash = "sha256:bd4557071b561a8b3b6075c3ce93cf9bfb6182cb241805c3d66ced3b75eff4ac", size = 10481, upload-time = "2025-05-19T14:16:36.024Z" },
+]
+
+[[package]]
+name = "ochre"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2a/dc/c9f58298ce87564913e3e3c2eac0c9c1d93fe5d864d54975a66820bd6a44/ochre-0.4.0.tar.gz", hash = "sha256:ecbd7632416038f925dc1cc7446c2b863246c36a1c44bb73d7e0fcc773e3c716", size = 10022, upload-time = "2021-12-19T23:40:35.23Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3b/58/5d62363742a0fe4e7d3b4d596f80ccdbcdfd281d647e89698a31fc27f8e9/ochre-0.4.0-py3-none-any.whl", hash = "sha256:6d64b3a055b455103cb90ea6c1cf7c15519b7dd146e3ff2677481a33f54b885b", size = 9642, upload-time = "2021-12-19T23:40:33.26Z" },
 ]
 
 [[package]]
@@ -348,6 +361,27 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/7c/91/263e33ab93ab09ca06ce4f8f8547a858cc198072f873ebc9be7466790bae/ruff-0.11.13-py3-none-win32.whl", hash = "sha256:96c27935418e4e8e77a26bb05962817f28b8ef3843a6c6cc49d8783b5507f250", size = 10474944, upload-time = "2025-06-05T21:00:08.459Z" },
     { url = "https://files.pythonhosted.org/packages/46/f4/7c27734ac2073aae8efb0119cae6931b6fb48017adf048fdf85c19337afc/ruff-0.11.13-py3-none-win_amd64.whl", hash = "sha256:29c3189895a8a6a657b7af4e97d330c8a3afd2c9c8f46c81e2fc5a31866517e3", size = 11548669, upload-time = "2025-06-05T21:00:11.147Z" },
     { url = "https://files.pythonhosted.org/packages/ec/bf/b273dd11673fed8a6bd46032c0ea2a04b2ac9bfa9c628756a5856ba113b0/ruff-0.11.13-py3-none-win_arm64.whl", hash = "sha256:b4385285e9179d608ff1d2fb9922062663c658605819a6876d8beef0c30b7f3b", size = 10683928, upload-time = "2025-06-05T21:00:13.758Z" },
+]
+
+[[package]]
+name = "stransi"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ochre" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fe/96/d72e9fd64f11502e37ec397a912bba4a81cbe195a07e0cd4d5b5a6268de7/stransi-0.3.0.tar.gz", hash = "sha256:2ba0195f935a8a152ad1921b25e14e7e78c549948d2ef0f63a6a5d9ab4625830", size = 8377, upload-time = "2021-12-20T00:22:28.544Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fa/10/71eff1dc5f6e97b1d245c9efb96cc7e581340fe6218bb4744e0e2f130859/stransi-0.3.0-py3-none-any.whl", hash = "sha256:7082fe969abca1059437a45b81c3b05a2eb1362503487bd35bd1d8919af3f0a4", size = 9622, upload-time = "2021-12-20T00:22:26.606Z" },
+]
+
+[[package]]
+name = "strip-ansi"
+version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b9/bd/273a435b7f9fd111b22f740b2661b6b734938c93d86531f9689747323c43/strip-ansi-0.1.1.tar.gz", hash = "sha256:5d60f239cc8a37fdd52b43c3e66e893d45ba0423115db59eca0d2eef83b07729", size = 1733, upload-time = "2020-06-20T22:24:49.349Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/22/a1/077deda41f949b3412434fda858396ee9927a3260a43537c2ae333bd688c/strip_ansi-0.1.1-py3-none-any.whl", hash = "sha256:9f55280e1b0ba84dac49d4f18aa6b51b90ff766b22e4918ffc01cc87b394ecd1", size = 1815, upload-time = "2020-06-20T22:24:50.453Z" },
 ]
 
 [[package]]

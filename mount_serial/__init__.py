@@ -2,15 +2,19 @@ import collections
 import errno
 import os
 import sys
+import threading
 import time
 import typing
 from argparse import ArgumentParser
 from base64 import b64decode, b64encode
 from collections.abc import Buffer, Iterator
 from datetime import datetime
+from glob import escape
 from itertools import islice
+from shlex import quote
 
 from serial import Serial
+from strip_ansi import strip_ansi
 from userspacefs import mount_and_run_fs
 import userspacefs.abc as fsabc
 from userspacefs.abc import PathT, Directory
@@ -30,14 +34,16 @@ from userspacefs.util_dumpster import (
 	datetime_from_ts,
 )
 
+import logging
+
+log = logging.getLogger(__name__)
+
+# Log everything
+logging.basicConfig(level=logging.DEBUG)
+
 Stat = collections.namedtuple(
 	"Stat", ["name", "mtime", "type", "size", "id", "ctime", "rev", "attrs"]
 )
-
-stat_type_map = {
-	"Regular File": "file",
-	"Directory": "directory",
-}
 
 try:
 	O_ACCMODE = os.O_ACCMODE
@@ -52,16 +58,87 @@ class SerialClient(Serial):
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
 
-	def write_line(self, line: str) -> None:
-		self.writelines([line.encode()])
+		# Flush
+		self.read_all()
+
+		self.prompt = b":~$ "
+
+		self.lock = threading.Lock()
+
+	def terminal_escape(self, text: str) -> str:
+		return f"${quote(text)}"
+
+	def read_lines(self, num_lines: int) -> list[str]:
+		lines = []
+
+		for _ in range(num_lines):
+			output = self.read_until(b"\n").decode()
+			output = output.rstrip("\r\n")
+
+			lines.append(output)
+
+		return lines
+
+	def discard_lines(self, num_lines: int) -> None:
+		for _ in range(num_lines):
+			self.read_until(b"\n")
+
+	def read_line(self) -> str:
+		return self.read_lines(1)[0]
+
+	def send_command(self, command: str) -> None:
+		log.debug(f"Sending command: {command}")
+
+		command = command.encode() + b"\n"
+
+		# Send command
+		self.write(command)
+
+		# Discard the echo
+		self.discard_lines(command.count(b"\n"))
+		self.read_until(b"\r")
+
+	def discard_prompt(self) -> None:
+		self.read_until(self.prompt)
 
 	def query_one_line(self, command: str) -> str:
-		self.write_line(command)
+		self.send_command(command)
 
-		# TODO: Add timeout, where .readline() returns an empty string
-		line = self.readline().decode("utf-8").rstrip("\n")
+		# Read output
+		output = self.read_line()
 
-		return line
+		log.debug(f"Received output for {command}: {output}")
+
+		# Discard prompt
+		self.discard_prompt()
+
+		return output
+
+	def query_x_lines(self, command: str, num_lines: int) -> list[str]:
+		self.send_command(command)
+
+		# Read output
+		output = self.read_lines(num_lines)
+
+		# Discard prompt
+		self.discard_prompt()
+
+		return output
+
+	def query_multiple_lines(self, command: str) -> list[str]:
+		self.send_command(command)
+
+		# Read output
+		output = self.read_until(self.prompt).decode()
+
+		output = output.split("\n")
+
+		# Discard prompt
+		output = output[:-1]
+
+		output = [line.rstrip("\r\n") for line in output]
+
+		return output
 
 
 class _File(PositionIO):
@@ -84,11 +161,11 @@ class _File(PositionIO):
 		bufm = memoryview(buf_)
 		size = len(bufm)
 
-		response = self.serial.query_one_line(
-			# TODO: Skip might have been seek in older versions of Linux https://stackoverflow.com/questions/2017285/how-to-extract-specific-bytes-from-a-file-using-unix#comment13831652_2017355
-			# TODO: Check for command injection
-			f'dd if="{self.path}" skip={offset} count={size} 2>/dev/null | base64 -w0'
-		)
+		with self.serial.lock:
+			response = self.serial.query_one_line(
+				# TODO: Skip might have been seek in older versions of Linux https://stackoverflow.com/questions/2017285/how-to-extract-specific-bytes-from-a-file-using-unix#comment13831652_2017355
+				f"dd if={escape(self.path)} skip={offset} count={size} 2>/dev/null | base64 -w0"
+			)
 
 		response = b64decode(response)
 
@@ -118,29 +195,29 @@ class _File(PositionIO):
 
 		# TODO: Check if write conflicts will occur
 
-		# TODO: Check for command injection
-		# TODO: Pad with null bytes if there is a gap between the end of the file and the offset
-		self.serial.write(
-			f'printf "R\n"; base64 -d | dd of={self.path} bs=1 seek={offset} conv=notrunc'
-		)
+		with self.serial.lock:
+			# TODO: Pad with null bytes if there is a gap between the end of the file and the offset
+			self.serial.send_command(
+				f"echo R; base64 -d | dd of={escape(self.path)} bs=1 seek={offset} conv=notrunc"
+			)
 
-		# pyserial read until newline
-		response = self.serial.read_until(b"R\n").decode("utf-8").rstrip("\n")
+			# pyserial read until newline
+			response = self.serial.read_line()
 
-		# TODO: Check if ready signal is needed, or if .flush() is enough, or not necessary either
-		if response != "R":
-			# TODO: Check if this type of error is correct
-			raise OSError(errno.EIO, os.strerror(errno.EIO))
+			# TODO: Check if ready signal is needed, or if .flush() is enough, or not necessary either
+			if response != "R":
+				# TODO: Check if this type of error is correct
+				raise OSError(errno.EIO, os.strerror(errno.EIO))
 
-		# Stream Base64
-		self.serial.write(b64encode(buf))
+			# Stream Base64
+			self.serial.write(b64encode(buf))
 
-		self.serial.write(b"\x04")  # Interrupt
+			self.serial.write(b"\x04")  # Interrupt
 
-		# TODO: Catch write errors, such as disk full, file not found, readonly
+			# TODO: Catch write errors, such as disk full, file not found, readonly
 
-		# Wait for termination
-		self.serial.read_until(b"\n")
+			# Wait for termination, discarding prompt
+			self.serial.discard_prompt()
 
 		return len(response)
 
@@ -151,8 +228,9 @@ class _File(PositionIO):
 		if not self.writable():
 			raise OSError(errno.EBADF, os.strerror(errno.EBADF))
 
-		# If there is a gap between the end of the file and the offset, it will be filled with null bytes
-		self.serial.query_one_line(f'truncate -s {offset} "{self.path}"')
+		with self.serial.lock:
+			# If there is a gap between the end of the file and the offset, it will be filled with null bytes
+			self.serial.query_one_line(f'truncate -s {offset} "{self.path}"')
 
 		# New file size
 		return offset
@@ -163,19 +241,17 @@ class _Directory(OldDirectoryProtocol):
 		self.path = path
 		self.serial = serial
 
-		delimiter = "\037"  # ASCII unit seperator
+		delimiter = self.serial.terminal_escape("\037")  # ASCII unit seperator
 		suffix = "\0"  # Null terminator
+		
+		delimiter = "MOUNTSERIALDELIMITER"
 
-		# TODO: Slightly different -c argument should be used for MacOS
-		self.serial.write_line(
-			f'find {path} -mindepth 1 -maxdepth 1 -exec stat -c "%n${delimiter}%s${delimiter}%F${delimiter}%Y${delimiter}%Z" "{{}}" \\; echo "{suffix}"'
-		)
-		contents = (
-			serial.read_until(suffix.encode() + b"\n")
-			.decode("utf-8")
-			.rstrip("\n" + suffix)
-			.splitlines()
-		)
+		with self.serial.lock:
+			# TODO: Slightly different -c argument should be used for MacOS
+			contents = self.serial.query_multiple_lines(
+				# f'd={delimiter}; find {quote(str(path))} -mindepth 1 -maxdepth 1 -exec stat -c "%n$d%s$d%F$d%Y$d%Z" "{{}}" \\;'
+				f'find {quote(str(path))} -mindepth 1 -maxdepth 1 -exec stat -c "%n{delimiter}%s{delimiter}%F{delimiter}%Y{delimiter}%Z" "{{}}" \\;'
+			)
 
 		files = []
 
@@ -187,9 +263,12 @@ class _Directory(OldDirectoryProtocol):
 					name=name,
 					mtime=datetime.fromtimestamp(int(mtime)),
 					ctime=datetime.fromtimestamp(int(ctime)),
-					type=stat_type_map[file_type],
+					type=file_type,
 					size=int(size),
-					# TODO: Add id and rev?
+					# TODO: Remove these
+					id=name,
+					rev=[],
+					attrs=Stat._fields,
 				)
 			)
 
@@ -231,23 +310,37 @@ class FileSystem(fsabc.FileSystemG[Path, _File]):
 		return self.stat(fobj.path)
 
 	def stat(self, path: Path | str) -> NewStat:
-		delimiter = "\037"  # ASCII unit seperator
+		delimiter = self.serial.terminal_escape("\037")  # ASCII unit seperator
 		suffix = "\0"  # Null terminator
 
-		# TODO: Slightly different -c argument should be used for MacOS
-		response = self.serial.query_one_line(
-			f'stat -c "%s${delimiter}%F${delimiter}%Y${delimiter}%Z" "{path}"'
-		)
+		# log.debug("Send stat command for path: %s", path)
+		#
+		# log.debug("RESPONSE" + self.serial.query_one_line(f"echo ABC"))
+
+		delimiter = "MOUNTSERIALDELIMITER"
+
+		with self.serial.lock:
+			# TODO: Slightly different -c argument should be used for MacOS
+			response = self.serial.query_one_line(
+				# f'd={delimiter}; stat -c "%s$d%F$d%Y$d%Z" {escape(str(path))}'
+				f'stat -c "%s{delimiter}%F{delimiter}%Y{delimiter}%Z" {escape(str(path))}'
+			)
+
+		# log.debug("Received stat response: %s", response)
+
 		size, file_type, mtime, ctime = response.split(delimiter)
 
 		return NewStat(
 			Stat(
-				# name=None,
+				name=None,
 				mtime=datetime.fromtimestamp(int(mtime)),
 				ctime=datetime.fromtimestamp(int(ctime)),
-				type=stat_type_map[file_type],
+				type=file_type,
 				size=int(size),
-				# TODO: Add id and rev?
+				# TODO: Remove these
+				id=path,
+				rev=[],
+				attrs=Stat._fields
 			)
 		)
 
@@ -266,6 +359,7 @@ class FileSystem(fsabc.FileSystemG[Path, _File]):
 			path=str(path),
 			mode=mode,
 			type=file_type,
+			serial=self.serial,
 		)
 
 	def preadinto(self, handle: _File, buf: Buffer, offset: int) -> int:
@@ -279,9 +373,10 @@ class FileSystem(fsabc.FileSystemG[Path, _File]):
 		pass
 
 	def _get_is_directory(self, path: Path) -> bool:
-		response = self.serial.query_one_line(
-			f'[ -d "{path}" ] && echo "Y" || echo "N"'
-		)
+		with self.serial.lock:
+			response = self.serial.query_one_line(
+				f'[ -d {escape(str(path))} ] && echo "Y" || echo "N"'
+			)
 
 		return response == "Y"
 
@@ -291,22 +386,32 @@ class FileSystem(fsabc.FileSystemG[Path, _File]):
 		if not is_directory:
 			raise OSError(errno.ENOTDIR, os.strerror(errno.ENOTDIR))
 
-		return NewDirectory(_Directory(path))
+		return NewDirectory(_Directory(path, self.serial))
 
 	def unlink(self, path: Path) -> None:
-		self.serial.query_one_line(f'rm -f "{path}"')
+		with self.serial.lock:
+			self.serial.query_one_line(f"rm -f {escape(str(path))}")
 
 	def mkdir(self, path: Path) -> None:
-		self.serial.query_one_line(f'mkdir -p "{path}"')
+		with self.serial.lock:
+			self.serial.query_one_line(f'mkdir -p "{escape(str(path))}')
 
 	def rmdir(self, path: Path) -> None:
-		self.serial.query_one_line(f'rm -rf "{path}"')
+		with self.serial.lock:
+			self.serial.query_one_line(f"rm -rf {escape(str(path))}")
 
 	def replace(self, old_path: Path, new_path: Path) -> None:
-		self.serial.query_one_line(f'mv -f "{old_path}" "{new_path}"')
+		with self.serial.lock:
+			self.serial.query_one_line(
+				f"mv -f {escape(str(old_path))} {escape(str(new_path))}"
+			)
 
 	def statvfs(self) -> StatVFSDC:
-		response = self.serial.query_one_line('stat -f -c "%s %b %a" /')
+		with self.serial.lock:
+			response = self.serial.query_one_line('stat -f -c "%s %b %a" /')
+
+		# log.debug("Received statvfs response: %s", response)
+		# log.debug("END RESPONSE")
 
 		frsize, blocks, bavail = map(int, response.split())
 
@@ -326,14 +431,15 @@ class FileSystem(fsabc.FileSystemG[Path, _File]):
 
 		new_mtime_ts = datetime_from_ts(new_mtime_ts)
 
-		self.serial.query_one_line(
-			f'touch -m -d "{new_mtime_ts.strftime("%Y-%m-%dT%H:%M:%S.%fZ")}" "{handle.path}"'
-		)
+		with self.serial.lock:
+			self.serial.query_one_line(
+				f'touch -m -d "{new_mtime_ts.strftime("%Y-%m-%dT%H:%M:%S.%fZ")}" "{handle.path}"'
+			)
 
 
-def make_fs(*args, **kwargs):
-	print("HI")
-	return FileSystem(*args, **kwargs)
+def make_fs(args: typing.Dict[str, typing.Any]) -> FileSystem:
+	# log.debug("Creating filesystem")
+	return FileSystem(**args)
 
 
 if __name__ == "__main__":
@@ -356,7 +462,7 @@ if __name__ == "__main__":
 			},
 		),
 		mount_point=args.mount_point,
-		on_mount=lambda _: print("HELLO"),
+		foreground=True,
 	)
 
 	# serial = Serial(
